@@ -15,6 +15,33 @@ per-file diff commands.
 
 ### Fixed
 
+- **`check_framework_version.py`'s git diff read no longer crashes on non-ASCII framework-file
+  content** (`tools/check_framework_version.py`) - `run_git()` called
+  `subprocess.run(text=True)` without an explicit `encoding`, so output decoded via the host
+  locale's default codec instead of UTF-8. On a real Windows checkout (cp1252 default) this
+  raised `UnicodeDecodeError` on any byte cp1252 leaves undefined - Cyrillic Ё/ё, much CJK,
+  Á-class Latin - appearing in a framework file's diff, crashing the version gate before it
+  ever evaluated the change. `run_git()` now passes `encoding="utf-8"` and `errors="replace"`
+  (matching the convention already used elsewhere in this repo, e.g. `robots_check.py`),
+  decoding deterministically regardless of host locale. Pinned by `RunGitEncodingTests` in
+  `tests/test_check_framework_version.py`, which fails against the original un-pinned call.
+
+- **`/rank` still sweeps deadlines when there is nothing new to score** (`.claude/commands/rank.md`
+  Step 1, `tests/test_rank_command.py`) - when `rank_state.py candidates` reported no eligible
+  jobs, Step 1 said "Nothing new to rank" and stopped before Step 3's rule 6 expiry sweep ever
+  ran. Once a backlog has been ranked, that is the path every later `/rank` takes, so
+  past-deadline jobs stayed `ranked` and approaching-deadline reminders were never shown.
+  Reproduced on the real CLI with four `ranked` entries (deadlines 2026-09-22, 2026-09-28,
+  null, `ASAP`): `candidates --today 2026-09-25` returns `eligible: 0` and master stops there,
+  while `sweep --write` on the same state expires the 09-22 entry, lists 09-28 under
+  `closing_soon` and `ASAP` under `unparseable_deadlines`, and leaves the null one alone. The
+  empty-candidate branch of Step 1 now runs `python3 tools/rank_state.py sweep --write`, skips
+  profile loading and Steps 2-4 (nothing to fetch or score; the tracker is untouched), and
+  presents a sweep-only Step 5 summary - `swept`, `newly_expired`, `closing_soon` with deadlines
+  and URLs, `unparseable_deadlines` with portals - before suggesting `/scrape`. An empty batch
+  caused by a focus filter or tracker exclusion takes the same path. Pinned by
+  `test_step1_empty_candidates_still_sweeps_and_reports`, which fails against master's `rank.md`.
+
 - **`robots_check` no longer reads a leading BOM or an undecodable rule as permission**
   (`tools/robots_check.py`, `tests/test_robots_check.py`) - two decoding edge cases failed
   open, both flagged as follow-ups in #506. A robots.txt saved with a UTF-8 byte-order mark
