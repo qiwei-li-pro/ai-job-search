@@ -6,6 +6,10 @@
 name: Automatic upstream sync
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/upstream-sync.yml
   schedule:
     - cron: "17 8 * * *" # Daily at 08:17 UTC; GitHub may delay scheduled runs.
   workflow_dispatch:
@@ -30,9 +34,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Refuse to sync if the fork relationship or default branch changes.
+          # Pin the repository's stable numeric identity, not its owner/name:
+          # MadsLorentzen/ai-job-search moved to ai-job-search-dev in October 2026.
+          # A transfer/rename is safe; a different parent or branch still stops.
           gh api "repos/$GH_REPO" > repo.json
-          jq -e '.fork == true and .parent.full_name == "MadsLorentzen/ai-job-search" and .default_branch == "master" and .parent.default_branch == "master"' repo.json > /dev/null
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          repo = json.loads(Path("repo.json").read_text(encoding="utf-8"))
+          parent = repo.get("parent") or {}
+          checks = {
+              "target repository": repo.get("full_name") == os.environ["GH_REPO"],
+              "fork relationship": repo.get("fork") is True,
+              "upstream repository ID": parent.get("id") == 1185389803,
+              "fork default branch": repo.get("default_branch") == "master",
+              "upstream default branch": parent.get("default_branch") == "master",
+          }
+          failed = [name for name, valid in checks.items() if not valid]
+          observed = (
+              f"parent={parent.get('full_name')!r}, id={parent.get('id')!r}, "
+              f"fork branch={repo.get('default_branch')!r}, "
+              f"upstream branch={parent.get('default_branch')!r}"
+          )
+          if failed:
+              message = f"Fork validation failed ({', '.join(failed)}): {observed}. No merge attempted."
+              print(f"::error::{message}", file=sys.stderr)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write(f"## Upstream sync stopped\n\n{message}\n")
+              sys.exit(1)
+          print(f"Validated upstream: {observed}")
+          PY
 
           if ! gh api --method POST "repos/$GH_REPO/merge-upstream" \
             -H "Accept: application/vnd.github+json" \
@@ -49,7 +83,7 @@ jobs:
             echo "## Upstream sync"
             jq -r '.message, ("Merge type: " + (.merge_type // "none")), ("Base branch: " + (.base_branch // "master"))' sync-result.json
             echo
-            echo "Source: MadsLorentzen/ai-job-search (master)"
+            echo "Source: $(jq -r '.parent.full_name' repo.json) (master; repository ID 1185389803)"
             echo "Target: $GH_REPO (master)"
             echo "Local commits are preserved. Conflicts stop the run."
           } >> "$GITHUB_STEP_SUMMARY"
